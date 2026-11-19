@@ -1,12 +1,14 @@
 #pragma once
 
 #include "GlintDsp.h"
+#include "GlintPresets.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
 /** Glint — variable-mu tube compressor (Glint Audio).
 
-    VST3 + Standalone; UI for this slice is juce::GenericAudioProcessorEditor.
+    VST3 + AU + Standalone; custom hardware-style faceplate editor
+    (see GlintEditor).
 */
 class GlintAudioProcessor : public juce::AudioProcessor
 {
@@ -19,10 +21,7 @@ public:
 
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
 
-    juce::AudioProcessorEditor* createEditor() override
-    {
-        return new juce::GenericAudioProcessorEditor (*this);
-    }
+    juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
     const juce::String getName() const override { return "Glint"; }
@@ -31,23 +30,33 @@ public:
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 30.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    int getNumPrograms() override { return glint::numPresets; }
+    int getCurrentProgram() override { return currentProgram; }
+    void setCurrentProgram (int index) override;
+    const juce::String getProgramName (int index) override;
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
-    /** Current gain reduction in dB, for a future meter. */
+    /** Current gain reduction in dB, for the editor meter. */
     std::atomic<float>& getGainReductionDb() noexcept { return engine.gainReductionDb; }
 
-    // Exposed for tests and a future custom UI.
+    // Exposed for tests.
     juce::AudioProcessorValueTreeState apvts;
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+
+    /** Applies factory preset `index` to every parameter (each as one host
+        gesture) and remembers the index in the APVTS state so it survives
+        save/reload. */
+    void applyPreset (int index);
+
+    /** APVTS state property that persists the current preset index. */
+    static constexpr const char* presetIndexPropertyId = "presetIndex";
+
+    int currentProgram = 0;
 
     glint::Engine engine;
     bool prepared = false;

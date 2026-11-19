@@ -2,9 +2,12 @@
 // each check prints PASS/FAIL and the process exit code is the failure count.
 #include "GlintDsp.h"
 #include "PluginProcessor.h"
+#include "ReferenceSignal.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <numeric>
@@ -508,6 +511,228 @@ void testStateRoundTrip()
     check (ok, "all parameter values survive get/set state");
 }
 
+void testParameterTextRoundTrip()
+{
+    std::puts ("test 9: parameter text round-trips and out-of-range input clamps");
+
+    GlintAudioProcessor p;
+
+    // displayStep = the smallest change the formatted text can express.
+    struct Spec { const char* id; float displayStep; };
+    const Spec specs[] { { "input",     0.01f },
+                         { "threshold", 0.1f  },
+                         { "sparkle",   1.0f  },
+                         { "mix",       1.0f  },
+                         { "output",    0.01f } };
+
+    for (const auto& spec : specs)
+    {
+        auto* pf = dynamic_cast<juce::AudioParameterFloat*> (p.apvts.getParameter (spec.id));
+        jassertquiet (pf != nullptr);
+        if (pf == nullptr)
+        {
+            check (false, "float parameter found");
+            continue;
+        }
+
+        // getText/getValueForText are private overrides on AudioParameterFloat;
+        // call them through the public AudioProcessorParameter interface.
+        auto& param = static_cast<juce::AudioProcessorParameter&> (*pf);
+
+        // getText(value) -> getValueForText(text) must land within one
+        // display step of the original value.
+        const float v = pf->get();
+        const juce::String text = param.getText (pf->convertTo0to1 (v), 64);
+        const float back = pf->convertFrom0to1 (param.getValueForText (text));
+
+        char msg[128];
+        std::snprintf (msg, sizeof (msg), "%s: \"%s\" -> %.3f (was %.3f)",
+                       spec.id, text.toRawUTF8(), (double) back, (double) v);
+        check (std::abs (back - v) <= spec.displayStep + 1.0e-4f, msg);
+
+        // getValueForText("999") must clamp to the parameter maximum.
+        const float clamped = pf->convertFrom0to1 (param.getValueForText ("999"));
+        const float rangeMax = pf->getNormalisableRange().end;
+        std::snprintf (msg, sizeof (msg), "%s: \"999\" clamps to max %.2f",
+                       spec.id, (double) rangeMax);
+        check (std::abs (clamped - rangeMax) < 1.0e-4f, msg);
+    }
+
+    // Typo-tolerant parsing on a dB parameter: bare numbers, units and
+    // explicit signs all resolve to the same value.
+    auto* input = dynamic_cast<juce::AudioParameterFloat*> (p.apvts.getParameter ("input"));
+    jassertquiet (input != nullptr);
+    auto& inputParam = static_cast<juce::AudioProcessorParameter&> (*input);
+    auto parsesTo = [&inputParam, &input] (const char* text)
+    {
+        return input->convertFrom0to1 (inputParam.getValueForText (text));
+    };
+    check (std::abs (parsesTo ("3") - 3.0f) < 0.01f, "input \"3\" -> 3 dB");
+    check (std::abs (parsesTo ("3 dB") - 3.0f) < 0.01f, "input \"3 dB\" -> 3 dB");
+    check (std::abs (parsesTo ("+3.0") - 3.0f) < 0.01f, "input \"+3.0\" -> 3 dB");
+
+    // Same round-trip at one non-default value per parameter (the value box
+    // has to survive what the user typed, not just the default), including
+    // a negative dB value.
+    struct NonDefaultSpec { const char* id; float value; float displayStep; };
+    const NonDefaultSpec nonDefaults[] { { "input",     -3.567f, 0.01f },
+                                         { "threshold",  7.5f,   0.1f  },
+                                         { "sparkle",    77.0f,  1.0f  },
+                                         { "mix",        33.0f,  1.0f  },
+                                         { "output",     -8.25f, 0.01f } };
+
+    for (const auto& spec : nonDefaults)
+    {
+        auto* pf = dynamic_cast<juce::AudioParameterFloat*> (p.apvts.getParameter (spec.id));
+        jassertquiet (pf != nullptr);
+        if (pf == nullptr)
+        {
+            check (false, "float parameter found");
+            continue;
+        }
+
+        *pf = spec.value;
+        auto& param = static_cast<juce::AudioProcessorParameter&> (*pf);
+        const juce::String text = param.getText (pf->convertTo0to1 (spec.value), 64);
+        const float back = pf->convertFrom0to1 (param.getValueForText (text));
+
+        char msg[128];
+        std::snprintf (msg, sizeof (msg), "%s: %+.3f renders \"%s\" -> %.3f",
+                       spec.id, (double) spec.value, text.toRawUTF8(), (double) back);
+        check (std::abs (back - spec.value) <= spec.displayStep + 1.0e-4f, msg);
+    }
+
+    // The negative dB case must format with an explicit sign and two decimals.
+    {
+        auto* pf = dynamic_cast<juce::AudioParameterFloat*> (p.apvts.getParameter ("input"));
+        jassertquiet (pf != nullptr);
+        *pf = -3.567f;
+        auto& param = static_cast<juce::AudioProcessorParameter&> (*pf);
+        const juce::String text = param.getText (pf->convertTo0to1 (-3.567f), 64);
+        check (text == "-3.57 dB", "input -3.567 shows \"-3.57 dB\"");
+    }
+}
+
+//------------------------------------------------------------------------------
+// Factory presets: calibrated by measured gain reduction (tests 10, 11).
+
+void testPresetAccuracy()
+{
+    std::puts ("test 10: calibrated presets hit their GR/loudness targets on the reference signal");
+
+    const auto sig = glint::refsig::makeReferenceSignal();
+
+    // Init (preset 0) keeps the factory defaults and is not calibrated; the
+    // nine calibrated presets must reproduce their measured GR and RMS.
+    for (int i = 1; i < glint::numPresets; ++i)
+    {
+        const auto& preset = glint::factoryPresets[static_cast<size_t> (i)];
+
+        glint::EngineParameters p;
+        p.inputDb = preset.inputDb;
+        p.outputDb = preset.outputDb;
+        p.thresholdKnob = preset.thresholdKnob;
+        p.timeMode = preset.timeMode;
+        p.midSide = preset.midSide;
+        p.sparkle01 = preset.sparklePct / 100.0f;
+        p.mix01 = preset.mixPct / 100.0f;
+
+        const auto m = glint::refsig::measure (p, sig);
+
+        char msg[160];
+        std::snprintf (msg, sizeof (msg),
+                       "%s: mean GR %.2f dB vs target %.2f dB (in %.1f, thr %.2f)",
+                       preset.name, m.meanGrDb, (double) preset.targetGrDb,
+                       (double) preset.inputDb, (double) preset.thresholdKnob);
+        check (std::abs (m.meanGrDb - (double) preset.targetGrDb) <= 1.0, msg);
+
+        std::snprintf (msg, sizeof (msg),
+                       "%s: output RMS %.2f dB vs input %.2f dB (loudness match)",
+                       preset.name, m.outRmsDb, m.inRmsDb);
+        check (std::abs (m.outRmsDb - m.inRmsDb) <= 1.0, msg);
+    }
+}
+
+void testPresetProgramRoundTrip()
+{
+    std::puts ("test 11: program selection + preset parameters survive state round-trip");
+
+    GlintAudioProcessor a;
+    const int chosen = 4;   // Drum Smash (parallel)
+    a.setCurrentProgram (chosen);
+
+    check (a.getCurrentProgram() == chosen, "setCurrentProgram(4) selects preset 4");
+
+    const auto& preset = glint::factoryPresets[static_cast<size_t> (chosen)];
+
+    // Applying a preset sets every parameter to the preset's values.
+    bool paramsOk = true;
+    for (const char* id : { "input", "threshold", "sparkle", "mix", "output" })
+    {
+        const float v = a.apvts.getRawParameterValue (id)->load();
+        const float expected = [&]
+        {
+            if (std::strcmp (id, "input") == 0)     return preset.inputDb;
+            if (std::strcmp (id, "threshold") == 0) return preset.thresholdKnob;
+            if (std::strcmp (id, "sparkle") == 0)   return preset.sparklePct;
+            if (std::strcmp (id, "mix") == 0)       return preset.mixPct;
+            return preset.outputDb;
+        }();
+        if (std::abs (v - expected) > 1.0e-3f)
+        {
+            std::printf ("    mismatch %s: %.4f vs expected %.4f\n", id,
+                         (double) v, (double) expected);
+            paramsOk = false;
+        }
+    }
+    const auto* timeA = dynamic_cast<juce::AudioParameterChoice*> (a.apvts.getParameter ("time"));
+    const auto* linkA = dynamic_cast<juce::AudioParameterChoice*> (a.apvts.getParameter ("link"));
+    jassertquiet (timeA != nullptr && linkA != nullptr);
+    if (timeA != nullptr && timeA->getIndex() != preset.timeMode - 1)
+    {
+        std::printf ("    mismatch time: %d vs expected %d\n",
+                     timeA->getIndex(), preset.timeMode - 1);
+        paramsOk = false;
+    }
+    if (linkA != nullptr && linkA->getIndex() != (preset.midSide ? 1 : 0))
+    {
+        std::printf ("    mismatch link\n");
+        paramsOk = false;
+    }
+    check (paramsOk, "setCurrentProgram applies the preset's parameter values");
+
+    juce::MemoryBlock state;
+    a.getStateInformation (state);
+
+    GlintAudioProcessor b;
+    b.setStateInformation (state.getData(), static_cast<int> (state.getSize()));
+
+    check (b.getCurrentProgram() == chosen, "program index restored from state");
+
+    bool restoreOk = true;
+    for (const char* id : { "input", "threshold", "sparkle", "mix", "output" })
+    {
+        const float va = a.apvts.getRawParameterValue (id)->load();
+        const float vb = b.apvts.getRawParameterValue (id)->load();
+        if (std::abs (va - vb) > 1.0e-6f)
+        {
+            std::printf ("    mismatch %s: %.6f vs %.6f\n", id, (double) va, (double) vb);
+            restoreOk = false;
+        }
+    }
+    for (const char* id : { "time", "link" })
+    {
+        const auto va = dynamic_cast<juce::AudioParameterChoice*> (a.apvts.getParameter (id))->getCurrentChoiceName();
+        const auto vb = dynamic_cast<juce::AudioParameterChoice*> (b.apvts.getParameter (id))->getCurrentChoiceName();
+        if (va != vb)
+        {
+            std::printf ("    mismatch %s: %s vs %s\n", id, va.toRawUTF8(), vb.toRawUTF8());
+            restoreOk = false;
+        }
+    }
+    check (restoreOk, "all parameter values restored identically");
+}
+
 //------------------------------------------------------------------------------
 // Stress sweep: one compact table-driven loop over every parameter combination
 // x signal x sample rate.  Guards against nonlinear-stage saturation (the
@@ -661,6 +886,9 @@ int main()
     testMidSideIdentical();
     testSparkleAir();
     testStateRoundTrip();
+    testParameterTextRoundTrip();
+    testPresetAccuracy();
+    testPresetProgramRoundTrip();
     testStressSweep();
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);

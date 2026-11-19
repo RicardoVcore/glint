@@ -35,6 +35,8 @@ juce_add_plugin (Glint
 
 target_sources (Glint PRIVATE
     src/GlintDsp.cpp
+    src/GlintLookAndFeel.cpp
+    src/PluginEditor.cpp
     src/PluginProcessor.cpp)
 
 target_compile_definitions (Glint PUBLIC
@@ -74,3 +76,28 @@ target_compile_options (glint_tests PRIVATE
 enable_testing ()
 
 add_test (NAME glint_tests COMMAND glint_tests)
+
+# Editor snapshot tool: visual review only, deliberately NOT registered with
+# CTest (it needs xvfb and produces build/editor.png for humans to look at).
+add_executable (glint_snapshot tests/EditorSnapshot.cpp)
+
+target_link_libraries (glint_snapshot PRIVATE Glint)
+
+target_include_directories (glint_snapshot PRIVATE src)
+
+target_compile_options (glint_snapshot PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra>)
+
+# Factory-preset calibration tool: measures the input/threshold/output values
+# printed ready-to-paste into src/GlintPresets.h.  Deliberately NOT registered
+# with CTest (it is a slow engineering tool, not a regression test).
+add_executable (glint_calibrate tests/PresetCalibrate.cpp)
+
+target_link_libraries (glint_calibrate PRIVATE Glint)
+
+target_include_directories (glint_calibrate PRIVATE src)
+
+target_compile_options (glint_calibrate PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra>)
