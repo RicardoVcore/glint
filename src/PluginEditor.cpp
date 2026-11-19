@@ -45,6 +45,8 @@ namespace
 GlintEditor::GlintEditor (GlintAudioProcessor& p)
     : AudioProcessorEditor (&p),
       processor (p),
+      prevButton      ("PresetPrevious", 0.5f, Palette::cream),   // arrow points left
+      nextButton      ("PresetNext", 0.0f, Palette::cream),       // arrow points right
       inputAttach     (std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (p.apvts, knobSpecs[0].id, knobs[0].slider)),
       thresholdAttach (std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (p.apvts, knobSpecs[1].id, knobs[1].slider)),
       timeAttach      (std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (p.apvts, knobSpecs[2].id, knobs[2].slider)),
@@ -107,6 +109,41 @@ GlintEditor::GlintEditor (GlintAudioProcessor& p)
     linkSwitch.setBounds (517, 194, 116, 48);
     addAndMakeVisible (linkSwitch);
 
+    // Preset bar: combo box under the "variable-mu tube compressor"
+    // subtitle, faceplate-styled value-box look, with small prev/next
+    // arrows beside it that cycle the factory presets.
+    for (int i = 0; i < glint::numPresets; ++i)
+        presetBox.addItem (glint::factoryPresets[static_cast<size_t> (i)].name, i + 1);
+    presetBox.setSelectedItemIndex (processor.getCurrentProgram(), juce::dontSendNotification);
+    presetBox.setJustificationType (juce::Justification::centredLeft);
+    presetBox.setColour (juce::ComboBox::textColourId,       Palette::cream);
+    presetBox.setColour (juce::ComboBox::backgroundColourId, Palette::knobBodyDark);
+    presetBox.setColour (juce::ComboBox::outlineColourId,    Palette::brassDim);
+    presetBox.setColour (juce::ComboBox::arrowColourId,      Palette::cream);
+    presetBox.setBounds (32, 76, 176, 20);
+    presetBox.onChange = [this]
+    {
+        if (const int index = presetBox.getSelectedItemIndex(); index >= 0)
+            processor.setCurrentProgram (index);
+    };
+    addAndMakeVisible (presetBox);
+
+    prevButton.setBounds (214, 76, 18, 20);
+    prevButton.onClick = [this]
+    {
+        const int n = processor.getNumPrograms();
+        processor.setCurrentProgram ((processor.getCurrentProgram() + n - 1) % n);
+    };
+    addAndMakeVisible (prevButton);
+
+    nextButton.setBounds (234, 76, 18, 20);
+    nextButton.onClick = [this]
+    {
+        processor.setCurrentProgram ((processor.getCurrentProgram() + 1)
+                                        % processor.getNumPrograms());
+    };
+    addAndMakeVisible (nextButton);
+
     // 30 Hz meter polling with editor-side ballistics.
     startTimerHz (30);
 }
@@ -125,6 +162,11 @@ void GlintEditor::paint (juce::Graphics& g)
 
 void GlintEditor::timerCallback()
 {
+    // Follow host-side program changes (when the combo was not the source).
+    if (presetBox.getSelectedItemIndex() != processor.getCurrentProgram())
+        presetBox.setSelectedItemIndex (processor.getCurrentProgram(),
+                                        juce::dontSendNotification);
+
     const float target = processor.getGainReductionDb().load (std::memory_order_relaxed);
     const float dt = 1.0f / 30.0f;
     // GR meters kick up quickly and fall back slowly (~300 ms release).

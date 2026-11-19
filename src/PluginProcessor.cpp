@@ -54,6 +54,13 @@ GlintAudioProcessor::GlintAudioProcessor()
     sparkleParam = apvts.getRawParameterValue ("sparkle");
     mixParam = apvts.getRawParameterValue ("mix");
     outputParam = apvts.getRawParameterValue ("output");
+
+    // Restore the persisted preset index (default 0 = Init for fresh states).
+    const auto stored = apvts.state.getProperty (presetIndexPropertyId, -1);
+    if (static_cast<int> (stored) >= 0 && static_cast<int> (stored) < glint::numPresets)
+        currentProgram = static_cast<int> (stored);
+    else
+        apvts.state.setProperty (presetIndexPropertyId, 0, nullptr);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout GlintAudioProcessor::createParameterLayout()
@@ -110,6 +117,44 @@ juce::AudioProcessorValueTreeState::ParameterLayout GlintAudioProcessor::createP
 juce::AudioProcessorEditor* GlintAudioProcessor::createEditor()
 {
     return new glint::GlintEditor (*this);
+}
+
+const juce::String GlintAudioProcessor::getProgramName (int index)
+{
+    return juce::isPositiveAndBelow (index, glint::numPresets)
+               ? juce::String (glint::factoryPresets[static_cast<size_t> (index)].name)
+               : juce::String();
+}
+
+void GlintAudioProcessor::setCurrentProgram (int index)
+{
+    applyPreset (index);
+}
+
+void GlintAudioProcessor::applyPreset (int index)
+{
+    index = juce::jlimit (0, glint::numPresets - 1, index);
+    currentProgram = index;
+    apvts.state.setProperty (presetIndexPropertyId, index, nullptr);
+
+    const auto& preset = glint::factoryPresets[static_cast<size_t> (index)];
+
+    // One begin/setValueNotifyingHost/end pair per parameter, so the host
+    // sees exactly one gesture (one undo step / automation event per knob).
+    auto set = [] (juce::RangedAudioParameter* p, float raw)
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost (p->convertTo0to1 (raw));
+        p->endChangeGesture();
+    };
+
+    set (apvts.getParameter ("input"),     preset.inputDb);
+    set (apvts.getParameter ("threshold"), preset.thresholdKnob);
+    set (apvts.getParameter ("time"),      static_cast<float> (preset.timeMode - 1));
+    set (apvts.getParameter ("link"),      preset.midSide ? 1.0f : 0.0f);
+    set (apvts.getParameter ("sparkle"),   preset.sparklePct);
+    set (apvts.getParameter ("mix"),       preset.mixPct);
+    set (apvts.getParameter ("output"),    preset.outputDb);
 }
 
 void GlintAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
@@ -172,7 +217,15 @@ void GlintAudioProcessor::setStateInformation (const void* data, int sizeInBytes
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes);
         xml != nullptr && xml->hasTagName (apvts.state.getType()))
+    {
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
+
+        // The restored state carries its own parameter values — only read
+        // back the preset index, never re-apply the preset on top of them.
+        const int restored = static_cast<int> (
+            apvts.state.getProperty (presetIndexPropertyId, currentProgram));
+        currentProgram = juce::jlimit (0, glint::numPresets - 1, restored);
+    }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

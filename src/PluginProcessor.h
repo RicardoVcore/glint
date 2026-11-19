@@ -1,6 +1,7 @@
 #pragma once
 
 #include "GlintDsp.h"
+#include "GlintPresets.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -29,10 +30,10 @@ public:
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 30.0; }
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    int getNumPrograms() override { return glint::numPresets; }
+    int getCurrentProgram() override { return currentProgram; }
+    void setCurrentProgram (int index) override;
+    const juce::String getProgramName (int index) override;
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -46,6 +47,16 @@ public:
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+
+    /** Applies factory preset `index` to every parameter (each as one host
+        gesture) and remembers the index in the APVTS state so it survives
+        save/reload. */
+    void applyPreset (int index);
+
+    /** APVTS state property that persists the current preset index. */
+    static constexpr const char* presetIndexPropertyId = "presetIndex";
+
+    int currentProgram = 0;
 
     glint::Engine engine;
     bool prepared = false;
