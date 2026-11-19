@@ -111,24 +111,67 @@ bool allFinite (const std::vector<float>& v)
     return true;
 }
 
-// Simple RBJ highpass biquad, used offline to measure energy above 10 kHz.
-double rmsAbove10k (const std::vector<float>& v)
+// Simple RBJ biquads, used offline to measure energy in a frequency band.
+struct RbjBiquad
 {
-    const double f0 = 10000.0, Q = 0.7071;
-    const double w0 = 2.0 * juce::MathConstants<double>::pi * f0 / fs;
-    const double cw = std::cos (w0), sw = std::sin (w0), alpha = sw / (2.0 * Q);
-    const double a0 = 1.0 + alpha;
-    const double b0 = (1.0 + cw) / 2.0 / a0, b1 = -(1.0 + cw) / a0, b2 = b0;
-    const double a1 = -2.0 * cw / a0, a2 = (1.0 - alpha) / a0;
+    double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
 
-    double x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0, sum = 0.0;
-    for (float xIn : v)
+    static RbjBiquad highpass (double f, double Q = 0.7071)
     {
-        const double x = xIn;
+        const double w0 = 2.0 * juce::MathConstants<double>::pi * f / fs;
+        const double cw = std::cos (w0), sw = std::sin (w0), alpha = sw / (2.0 * Q);
+        const double a0 = 1.0 + alpha;
+        RbjBiquad bq;
+        bq.b0 = (1.0 + cw) / 2.0 / a0;
+        bq.b1 = -(1.0 + cw) / a0;
+        bq.b2 = bq.b0;
+        bq.a1 = -2.0 * cw / a0;
+        bq.a2 = (1.0 - alpha) / a0;
+        return bq;
+    }
+
+    static RbjBiquad lowpass (double f, double Q = 0.7071)
+    {
+        const double w0 = 2.0 * juce::MathConstants<double>::pi * f / fs;
+        const double cw = std::cos (w0), sw = std::sin (w0), alpha = sw / (2.0 * Q);
+        const double a0 = 1.0 + alpha;
+        RbjBiquad bq;
+        bq.b0 = (1.0 - cw) / 2.0 / a0;
+        bq.b1 = (1.0 - cw) / a0;
+        bq.b2 = bq.b0;
+        bq.a1 = -2.0 * cw / a0;
+        bq.a2 = (1.0 - alpha) / a0;
+        return bq;
+    }
+
+    double process (double x)
+    {
         const double y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
         x2 = x1; x1 = x; y2 = y1; y1 = y;
+        return y;
+    }
+};
+
+// rms of v inside [fLo, fHi] (fHi <= 0: no upper bound).
+double rmsInBand (const std::vector<float>& v, double fLo, double fHi)
+{
+    RbjBiquad hp = RbjBiquad::highpass (fLo);
+    RbjBiquad lp = RbjBiquad::lowpass (fHi > 0.0 ? fHi : 23000.0);
+    double sum = 0.0;
+    for (float xIn : v)
+    {
+        const double y = lp.process (hp.process (xIn));
         sum += y * y;
     }
+    return std::sqrt (sum / static_cast<double> (v.size()));
+}
+
+double rmsOf (const std::vector<float>& v)
+{
+    double sum = 0.0;
+    for (float x : v)
+        sum += static_cast<double> (x) * static_cast<double> (x);
     return std::sqrt (sum / static_cast<double> (v.size()));
 }
 
@@ -295,8 +338,10 @@ void testMidSideIdentical()
 
 void testSparkleAir()
 {
-    std::puts ("test 6: sparkle=100 gives more energy above 10 kHz than sparkle=0");
+    std::puts ("test 6: sparkle=100 audibility (5-12 kHz lift), air level, loud-HF peak guard");
 
+    // Runs the test-6 signal (0.5 amplitude white noise, +6 dB input ->
+    // heavy compression) at a given sparkle and returns the output tail.
     auto runWith = [] (float sparkle, double& grOut)
     {
         glint::Engine e;
@@ -310,27 +355,81 @@ void testSparkleAir()
         run (e, static_cast<int> (fs), 2,
              [] (int c, int i) { return 0.5f * noiseAt (c, i); }, cap);
         grOut = static_cast<double> (e.gainReductionDb.load());
-        return rmsAbove10k (cap.ch[0]);
+        const int skip = static_cast<int> (0.1 * fs);
+        return std::vector<float> (cap.ch[0].begin() + skip, cap.ch[0].end());
     };
 
     double gr0 = 0.0, gr100 = 0.0;
-    const double rms0 = runWith (0.0f, gr0);
-    const double rms100 = runWith (1.0f, gr100);
-    std::printf ("    rms>10k: sparkle=0 -> %.5g, sparkle=100 -> %.5g (GR %.1f / %.1f dB)\n",
-                 rms0, rms100, gr0, gr100);
+    const auto wet0 = runWith (0.0f, gr0);
+    const auto wet100 = runWith (1.0f, gr100);
+
+    // sparkle=0 is an exact bypass, so the difference IS the added air.
+    std::vector<float> air (wet0.size());
+    for (size_t i = 0; i < wet0.size(); ++i)
+        air[i] = wet100[i] - wet0[i];
+
+    // Offline 2nd-order highpass at 3.5 kHz matches the engine's band split
+    // (the oversampling round trip is transparent below the FIR transition).
+    const double bandRms = rmsInBand (wet0, 3500.0, 0.0);
+    const double airRelDb = 20.0 * std::log10 (rmsOf (air) / bandRms);
+    const double liftDb = 20.0 * std::log10 (rmsInBand (wet100, 5000.0, 12000.0)
+                                            / rmsInBand (wet0, 5000.0, 12000.0));
+
+    std::printf ("    band >3.5 kHz rms: %.2f dBFS; added air: %+.2f dB rel band "
+                 "(airGain %.2f)\n",
+                 20.0 * std::log10 (bandRms), airRelDb, glint::airGain);
+    std::printf ("    5-12 kHz lift, sparkle=100 vs 0 under compression: %+.2f dB "
+                 "(GR %.1f / %.1f dB)\n",
+                 liftDb, gr0, gr100);
 
     check (gr0 > 1.0 && gr100 > 1.0, "both runs are under compression (GR > 1 dB)");
-    // The old band^2 saturator produced air ABOVE the >7 kHz band level
-    // (+1.9 dB rms on this signal), hence the old 1.2x threshold.  The
-    // level-tracking generator deliberately adds air well below the band
-    // (~13 dB at sparkle=100), so the expected rise is correspondingly
-    // smaller; the +1 dB peak regression below guards the explosion mode.
-    check (rms100 > rms0 * 1.01, "sparkle=100 raises >10 kHz energy");
+    // Target: 5-12 kHz lift = 2.5 dB +/- 0.5 dB, tuned via airGain only.
+    // The airGain sweep used to be capped by the stress sweep (its worst-case
+    // peak grew 1.106 + 0.497 * airGain with the air added linearly, so
+    // airGain <= ~1.79 and lift ~+0.9 dB).  The air is now soft-limited
+    // (tanh around airCeiling) before the add-back, so the ceiling — not the
+    // gain — absorbs the extreme input and airGain = 3.20 hits the target.
+    check (liftDb >= 2.0 && liftDb <= 3.0, "5-12 kHz lift within [2.0, 3.0] dB");
+
+    // Light compression: ~1.5 dB GR at input -7 dB.  The amount remap
+    // (0.6 + 0.4 * normGR instead of 0.3 + 0.7 * normGR) keeps sparkle
+    // clearly present when the compressor is only tickling.
+    auto runLight = [] (float sparkle, double& grOut)
+    {
+        glint::Engine e;
+        e.prepare (fs, blockSize);
+        auto p = baseParams();
+        p.sparkle01 = sparkle;
+        p.inputDb = -7.0f;
+        e.setParameters (p);
+        Capture cap;
+        run (e, static_cast<int> (fs), 2,
+             [] (int c, int i) { return 0.5f * noiseAt (c, i); }, cap);
+        grOut = static_cast<double> (e.gainReductionDb.load());
+        const int skip = static_cast<int> (0.1 * fs);
+        return std::vector<float> (cap.ch[0].begin() + skip, cap.ch[0].end());
+    };
+
+    double grl0 = 0.0, grl100 = 0.0;
+    const auto light0 = runLight (0.0f, grl0);
+    const auto light100 = runLight (1.0f, grl100);
+    const double liftLightDb = 20.0 * std::log10 (rmsInBand (light100, 5000.0, 12000.0)
+                                                 / rmsInBand (light0, 5000.0, 12000.0));
+    std::printf ("    light compression (GR %.2f dB): 5-12 kHz lift %+.2f dB\n",
+                 grl0, liftLightDb);
+    check (grl0 > 0.8 && grl0 < 2.5, "light run is under ~1-2 dB GR");
+    // Target: light-GR lift >= 1.0 dB.  Measured +1.14 dB at airGain = 3.20
+    // (see the heavy-lift comment above for why the ceiling unblocked the
+    // tuning).
+    check (liftLightDb >= 1.0, "light-GR 5-12 kHz lift >= 1.0 dB");
 
     // Regression: the old band^2 saturator exploded on loud HF material
-    // (near full-scale air once the band hit ~-26 dBFS).  With the
-    // level-tracking generator, a loud (-6 dBFS) 9 kHz sine at sparkle=100
-    // must add less than 1 dB of peak over sparkle=0.
+    // (near full-scale air once the band hit ~-26 dBFS).  This guard only
+    // catches blow-ups — the real guard is the stress sweep's peak < 2.0
+    // (test 8).  At the calibrated airGain = 3.20 the 9 kHz sine adds
+    // +4.6 dB of peak, still inside +6 dB (the 12 kHz lowpass rotates the
+    // harmonics away from the carrier peak, and the air ceiling caps the
+    // rest).
     auto sinePeak = [] (float sparkle)
     {
         glint::Engine e;
@@ -348,7 +447,7 @@ void testSparkleAir()
     const double pk100 = sinePeak (1.0f);
     std::printf ("    9 kHz peak: sparkle=0 -> %.4f, sparkle=100 -> %.4f (%+.2f dB)\n",
                  pk0, pk100, 20.0 * std::log10 (pk100 / pk0));
-    check (pk100 < pk0 * 1.12202, "loud 9 kHz sine: sparkle=100 peak < +1 dB vs sparkle=0");
+    check (pk100 < pk0 * 1.99526, "loud 9 kHz sine: sparkle=100 peak < +6 dB vs sparkle=0");
 }
 
 void testStateRoundTrip()

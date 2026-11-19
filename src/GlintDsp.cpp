@@ -123,8 +123,22 @@ void ColourStage::prepare (double baseSampleRate, int maxBlockSize)
     const double fsO = 2.0 * baseSampleRate; // oversampled rate
 
     *lfLP.coefficients = *juce::dsp::IIR::Coefficients<float>::makeLowPass (fsO, 120.0, 0.7071);
-    *hpAir1.coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighPass (fsO, 7000.0, 0.7071);
-    *hpAir2.coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighPass (fsO, 7000.0, 0.7071);
+    // Sparkle band split at 3.5 kHz (2nd order): harmonics of this band land
+    // around 7-14 kHz, inside adult hearing and above the transformer's
+    // ~18 kHz rolloff region.
+    *hpAir1.coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighPass (fsO, 3500.0, 0.7071);
+    // Post-generator highpass at 5 kHz: keeps only the NEW upper content
+    // (it removes the DC / low-frequency part of T2).
+    *hpAir2.coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighPass (fsO, 5000.0, 0.7071);
+    // Air lowpass at 12 kHz (see sparkleAirLpHz): two cascaded 2nd-order
+    // sections keep the added air out of the harsh 14-20 kHz region.
+    *airLP1.coefficients = *juce::dsp::IIR::Coefficients<float>::makeLowPass (fsO, sparkleAirLpHz, 0.7071);
+    *airLP2.coefficients = *juce::dsp::IIR::Coefficients<float>::makeLowPass (fsO, sparkleAirLpHz, 0.7071);
+
+    // Sparkle band envelope: fast peak follower, ~1 ms attack / ~20 ms
+    // release at the oversampled rate.
+    envAtkCoef = 1.0f - static_cast<float> (std::exp (-1.0 / (0.001 * fsO)));
+    envRelCoef = 1.0f - static_cast<float> (std::exp (-1.0 / (0.020 * fsO)));
 
     // One-pole HF rolloff, ~1 dB @ 18 kHz (absolute frequency, any sample rate).
     hfCoef = 1.0f - static_cast<float> (
@@ -142,7 +156,10 @@ void ColourStage::reset()
     lfLP.reset();
     hpAir1.reset();
     hpAir2.reset();
+    airLP1.reset();
+    airLP2.reset();
     hfZ = 0.0f;
+    env = 0.0f;
     biasTarget = 0.0f;
     sparkleTarget = 0.0f;
     bias = 0.0f;
@@ -157,8 +174,9 @@ void ColourStage::setCharacter (float normGR01, float sparkle01) noexcept
     // Bias shift grows with gain reduction -> a little 2nd harmonic when
     // the compressor works hard.
     biasTarget = 0.15f * juce::jlimit (0.0f, 1.0f, normGR01);
-    // Sparkle opens up as the compressor works.
-    sparkleTarget = sparkle01 * (0.3f + 0.7f * juce::jlimit (0.0f, 1.0f, normGR01));
+    // Sparkle opens up as the compressor works (still clearly present at
+    // light compression, unlike the old 0.3 + 0.7 * GR mapping).
+    sparkleTarget = sparkle01 * (0.6f + 0.4f * juce::jlimit (0.0f, 1.0f, normGR01));
 }
 
 inline float ColourStage::inner (float x) noexcept
@@ -179,22 +197,51 @@ inline float ColourStage::inner (float x) noexcept
     hfZ += hfCoef * (y - hfZ);
     y = hfZ;
 
-    // Sparkle: highpass, then full-wave rectify the band.  The generator is
-    // degree-1 homogeneous, so the added air scales LINEARLY with the band
-    // level (the old band^2 saturator was quadratic at low level and
-    // saturated to full scale once a loud band hit ~-26 dBFS, blowing loud
-    // cymbals up).  airGain keeps the added air about 12-14 dB below the
-    // >7 kHz band at sparkle=100; highpass again so only the NEW upper
-    // harmonics and intermodulation are added, never cancelling the
-    // existing highs.
-    // Run the air filters every sample even while the add-back is gated:
-    // a filter whose state freezes while sparkle is off produces a short
-    // transient on re-engagement.  With the add-back gated, sparkle=0 is
-    // still an exact bypass (the filters are linear, zero in -> zero out).
+    // Sparkle: band split at 3.5 kHz, then an envelope-normalised Chebyshev
+    // generator.  A fast peak follower (~1 ms attack, ~20 ms release, tiny
+    // epsilon floor) normalises the band so xn stays in [-1, 1]; the
+    // generator env * (c2 * T2(xn) + c3 * T3(xn)) is degree-1 homogeneous, so
+    // the added air scales LINEARLY with the band level (the old band^2
+    // saturator was quadratic at low level and saturated to full scale once
+    // a loud band hit ~-26 dBFS, blowing loud cymbals up; full-wave
+    // rectification of the 7 kHz band put nearly all new energy at 14-20 kHz,
+    // inaudible and under the transformer HF rolloff, which is why sparkle
+    // measured only +0.06 dB above 10 kHz in the DAW).  The 5 kHz post
+    // highpass keeps only genuinely NEW upper content (it removes the DC /
+    // low part of T2); note that on broadband material T3's -3x term adds a
+    // phase-rotated copy of the band itself (for pure tones it collapses
+    // into the 3rd harmonic instead) — measured net effect in 5-12 kHz is a
+    // lift, see test 6.  The two-section 12 kHz lowpass keeps the generated
+    // air inside the window where it is audible and useful, keeps the added
+    // air out of the harsh 14-20 kHz region, and rotates the harmonics of
+    // loud narrowband tones away from the carrier peak.  The air is then
+    // soft-limited (tanh around airCeiling) before the add-back so extreme
+    // input cannot blow the output peak past the stress bound.
+    // Run the air filters and the envelope every sample even while the
+    // add-back is gated: a filter whose state freezes while sparkle is off
+    // produces a short transient on re-engagement.  With the add-back
+    // gated, sparkle=0 is still an exact bypass (tanh(0) = 0, the filters
+    // are linear, zero in -> zero out).
     const float band = hpAir1.processSample (y);
-    const float s = hpAir2.processSample (std::abs (band));
+
+    const float rect = std::abs (band);
+    env += (rect > env ? envAtkCoef : envRelCoef) * (rect - env);
+    env = juce::jmax (env, sparkleEnvFloor);
+
+    const float xn = juce::jlimit (-1.0f, 1.0f, band / env);
+    const float gen = env * (sparkleChebyC2 * (2.0f * xn * xn - 1.0f)
+                           + sparkleChebyC3 * (4.0f * xn * xn * xn - 3.0f * xn));
+    const float s = airLP2.processSample (
+        airLP1.processSample (hpAir2.processSample (gen)));
     if (sparkle > 1.0e-6f)
-        y += sparkle * airGain * s;
+    {
+        // Soft-limit the air before the add-back: tanh is ~linear while the
+        // air sits well under the ceiling (normal programme levels — the
+        // measured lift is unchanged), but caps extreme input at roughly
+        // +-airCeiling, so the stress sweep no longer bounds airGain.
+        const float airOut = airCeiling * std::tanh (sparkle * airGain * s / airCeiling);
+        y += airOut;
+    }
 
     return y;
 }

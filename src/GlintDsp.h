@@ -33,13 +33,49 @@ constexpr float maxNormGrDb = 12.0f;
 /** Tube stage soft-clip steepness (small-signal gain stays 1). */
 constexpr float tubeK = 1.5f;
 
+/** Sparkle "air" generator, 2nd-harmonic (warmth) Chebyshev coefficient.
+    gen = env * (c2 * T2(x) + c3 * T3(x)) with x the envelope-normalised
+    band; c2 sets how much 2nd-harmonic (octave-up) air is generated. */
+constexpr float sparkleChebyC2 = 0.6f;
+
+/** Sparkle "air" generator, 3rd-harmonic (bite) Chebyshev coefficient.
+    c3 sets how much 3rd-harmonic air is generated. */
+constexpr float sparkleChebyC3 = 0.4f;
+
+/** Floor for the sparkle band envelope, so the envelope-normalised drive
+    x = band / env stays finite on near-silent bands.  Roughly -120 dBFS. */
+constexpr float sparkleEnvFloor = 1.0e-6f;
+
+/** Lowpass on the sparkle air path (two cascaded 2nd-order sections).  Keeps
+    the added air out of the harsh 14-20 kHz region: band content above ~6 kHz
+    generates harmonics there — above most adult hearing, under the transformer
+    HF rolloff, and partly peak-aligned with loud carrier tones (a single
+    2nd-order section leaves the 18 kHz harmonic aligned with the carrier
+    peak, which pushes a loud 9 kHz sine past the peak guard at the calibrated
+    air level; the two-section cascade rotates it away). */
+constexpr float sparkleAirLpHz = 12000.0f;
+
+/** Sparkle "air" soft ceiling.  The air signal is soft-limited to about
+    this amplitude via tanh before the add-back, so the worst-case output
+    peak grows by at most ~airCeiling regardless of airGain or input level
+    (full-scale noise, +20 dB input).  At normal programme levels the air
+    sits well under the ceiling where tanh is ~linear, so the measured lift
+    is unchanged; only extreme input gets capped.  Roughly -12 dBFS of
+    added air at most. */
+constexpr float airCeiling = 0.25f;
+
 /** Sparkle "air" generator gain.  The generator is degree-1 homogeneous
-    (full-wave rectification of the >7 kHz band), so the added air scales
-    linearly with the band level.  airGain is calibrated so that at
-    sparkle=100 the added air sits about 12-14 dB below the >7 kHz band
-    level (-14.8 dB on programme-like noise, -10.7 dB on a loud 9 kHz
-    sine), and a loud sine adds well under +1 dB of peak. */
-constexpr float airGain = 2.0f;
+    (envelope-normalised Chebyshev of the >3.5 kHz band), so the added air
+    scales linearly with the band level up to the airCeiling soft limit.
+    Measured on the test-6 signal at sparkle=100: airGain = 3.20 puts the
+    added air rms 0.7 dB below the >3.5 kHz band rms and lifts 5-12 kHz
+    energy by +2.41 dB under heavy compression (+1.14 dB light), inside the
+    [2.0, 3.0] / >= 1.0 dB targets; the loud 9 kHz sine peak guard measures
+    +4.6 dB (< +6).  The stress sweep used to cap airGain at ~1.79 (its
+    worst-case peak grew 1.106 + 0.497 * airGain with the air added
+    linearly); with the air soft-limited at airCeiling the worst case is
+    1.71 — the ceiling, not the gain, absorbs the extreme input. */
+constexpr float airGain = 3.20f;
 
 /** Maps the 0..10 threshold knob to the detector threshold in dBFS
     (3 dB per knob position: 0 -> -6 dBFS, 10 -> -36 dBFS). */
@@ -139,12 +175,24 @@ private:
       * transformer: the ~120 Hz low-passed band is softly saturated and
         summed back (gentle LF saturation), plus a one-pole HF rolloff
         (~1 dB @ 18 kHz);
-      * sparkle: high-pass at ~7 kHz (2nd order), full-wave rectify the band
-        (degree-1 homogeneous: only genuinely NEW upper harmonics and
-        intermodulation, scaling with the band level), high-pass again to
-        keep the new air, and add back scaled by
-        amount = sparkle * (0.3 + 0.7 * normalisedGR) so it opens up as the
-        compressor works. Exactly bypassed when sparkle is zero.
+      * sparkle: high-pass at ~3.5 kHz (2nd order) to isolate the band whose
+        harmonics will land in the audible 7-14 kHz region, then an
+        envelope-normalised Chebyshev generator: a fast peak follower of the
+        band (~1 ms attack, ~20 ms release, tiny epsilon floor) normalises
+        the band to x in [-1, 1] and the generator is
+        env * (c2 * (2x^2 - 1) + c3 * (4x^3 - 3x)).  Degree-1 homogeneous:
+        the added air scales LINEARLY with the band level (no blow-up on
+        loud material).  A post high-pass at ~5 kHz keeps only the NEW upper
+        content (it removes the DC/low part of T2), a two-section low-pass
+        at ~12 kHz keeps the added air inside the ~7-14 kHz window the band
+        was chosen for (harmonics of band content above ~6 kHz land at 12 kHz
+        and above, where they are inaudible, under the transformer rolloff
+        and partly peak-aligned with loud carrier tones), and the result is
+        soft-limited (tanh around airCeiling, ~linear well under the ceiling)
+        and added back scaled by amount = sparkle * (0.6 + 0.4 * normalisedGR)
+        so it opens up as the compressor works. The soft limit caps extreme
+        input at roughly +-airCeiling of added air, so the stress sweep no
+        longer bounds airGain. Exactly bypassed when sparkle is zero.
       * bias and sparkle amount are smoothed per oversampled sample with a
         one-pole (~10 ms), so block-rate parameter changes cannot zipper.
 
@@ -173,8 +221,13 @@ private:
 
     juce::dsp::Oversampling<float> overs;
     juce::dsp::IIR::Filter<float> lfLP;     // transformer LF band
-    juce::dsp::IIR::Filter<float> hpAir1;   // sparkle pre-emphasis
-    juce::dsp::IIR::Filter<float> hpAir2;   // sparkle "new air" selection
+    juce::dsp::IIR::Filter<float> hpAir1;   // sparkle band split (>3.5 kHz)
+    juce::dsp::IIR::Filter<float> hpAir2;   // sparkle "new air" selection (>5 kHz)
+    juce::dsp::IIR::Filter<float> airLP1;   // sparkle air lowpass ~12 kHz, section 1
+    juce::dsp::IIR::Filter<float> airLP2;   // sparkle air lowpass ~12 kHz, section 2
+    float envAtkCoef = 0.0f;                // sparkle band envelope, ~1 ms attack
+    float envRelCoef = 0.0f;                // sparkle band envelope, ~20 ms release
+    float env = 0.0f;                       // sparkle band envelope state
     float hfCoef = 0.0f;
     float hfZ = 0.0f;
     // Character targets (block rate) and one-pole-smoothed applied values
