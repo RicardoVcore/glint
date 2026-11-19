@@ -5,6 +5,25 @@ character: a "sparkle" air generator that opens up as the compressor works.
 Two channels, six time-constant positions, stereo-linked or Mid/Side
 (Lateral/Vertical) operation.
 
+## Download a build
+
+Every push to `staging` and every pull request runs a GitHub Actions build on
+macOS, Windows and Linux. Open the run on the Actions tab and download the
+`Glint-<os>` artifact; it contains the `Glint.vst3` bundle and the Standalone
+app/executable.
+
+To install the plugin, copy `Glint.vst3` to the system VST3 folder:
+
+- macOS: `~/Library/Audio/Plug-Ins/VST3`
+- Windows: `C:\Program Files\Common Files\VST3`
+- Linux: `~/.vst3`
+
+macOS builds are unsigned. Before loading, clear the quarantine flag:
+
+```sh
+xattr -dr com.apple.quarantine Glint.vst3
+```
+
 ## Controls
 
 | Control | Range | Default | Notes |

@@ -48,7 +48,9 @@ target_link_libraries (Glint PUBLIC
     juce::juce_recommended_config_flags)
 
 # Warnings for our translation units only (JUCE module sources are untouched).
-target_compile_options (Glint PRIVATE -Wall -Wextra)
+target_compile_options (Glint PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra>)
 
 add_executable (glint_tests tests/GlintTests.cpp)
 
@@ -56,7 +58,9 @@ target_link_libraries (glint_tests PRIVATE Glint)
 
 target_include_directories (glint_tests PRIVATE src)
 
-target_compile_options (glint_tests PRIVATE -Wall -Wextra)
+target_compile_options (glint_tests PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra>)
 
 enable_testing ()
 
