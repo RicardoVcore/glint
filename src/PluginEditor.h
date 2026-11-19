@@ -81,6 +81,12 @@ private:
     juce::Label linkLabel;          // "LINK" caption above the switch plate
     juce::ToggleButton linkSwitch;  // bounds = the recessed plate itself
 
+    // Preset bar: factory-preset selector plus prev/next arrows that cycle
+    // the list (no save/rename/modified marker).
+    juce::ComboBox presetBox;
+    juce::ArrowButton prevButton;
+    juce::ArrowButton nextButton;
+
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         inputAttach, thresholdAttach, timeAttach, sparkleAttach, mixAttach, outputAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> linkAttach;

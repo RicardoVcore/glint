@@ -145,6 +145,94 @@ void GlintLookAndFeel::drawTextEditorOutline (juce::Graphics& g, int width, int 
     g.drawRect (0, 0, width, height);
 }
 
+//==============================================================================
+// Preset combo box + popup menu
+
+void GlintLookAndFeel::drawComboBox (juce::Graphics& g, int width, int height, bool,
+                                     int, int, int, int, juce::ComboBox&)
+{
+    const auto box = juce::Rectangle<float> (0.0f, 0.0f, (float) width, (float) height);
+
+    // Dark inset panel with a thin brass outline, matching the value boxes.
+    g.setColour (Palette::knobBodyDark);
+    g.fillRoundedRectangle (box, 3.0f);
+    g.setColour (juce::Colours::black.withAlpha (0.5f));
+    g.drawRoundedRectangle (box, 3.0f, 2.0f);   // inner shadow rim
+    g.setColour (Palette::brassDim);
+    g.drawRoundedRectangle (box.reduced (0.75f), 3.0f, 1.0f);
+
+    // Small downward triangle on the right.
+    const float cx = (float) width - 13.0f;
+    const float cy = 0.5f * (float) height;
+    juce::Path arrow;
+    arrow.addTriangle (cx, cy - 2.5f, cx + 7.0f, cy - 2.5f, cx + 3.5f, cy + 2.5f);
+    g.setColour (Palette::cream);
+    g.fillPath (arrow);
+}
+
+juce::Font GlintLookAndFeel::getComboBoxFont (juce::ComboBox&)
+{
+    return { withDefaultMetrics (juce::FontOptions (12.0f)) };
+}
+
+void GlintLookAndFeel::positionComboBoxText (juce::ComboBox& box, juce::Label& label)
+{
+    label.setBounds (2, 0, box.getWidth() - 24, box.getHeight());
+    label.setFont (getComboBoxFont (box));
+}
+
+void GlintLookAndFeel::drawPopupMenuBackgroundWithOptions (juce::Graphics& g, int width,
+                                                           int height,
+                                                           const juce::PopupMenu::Options&)
+{
+    g.setColour (Palette::knobBodyDark);
+    g.fillRoundedRectangle (0.5f, 0.5f, (float) width - 1.0f, (float) height - 1.0f, 3.0f);
+    g.setColour (Palette::brassDim);
+    g.drawRoundedRectangle (0.5f, 0.5f, (float) width - 1.0f, (float) height - 1.0f, 3.0f, 1.0f);
+}
+
+void GlintLookAndFeel::drawPopupMenuItemWithOptions (juce::Graphics& g,
+                                                     const juce::Rectangle<int>& area,
+                                                     bool isHighlighted,
+                                                     const juce::PopupMenu::Item& item,
+                                                     const juce::PopupMenu::Options&)
+{
+    auto r = area.reduced (1);
+
+    if (item.isSeparator)
+    {
+        g.setColour (Palette::brassDim.withAlpha (0.5f));
+        g.fillRect (r.removeFromTop (1));
+        return;
+    }
+
+    if (isHighlighted && item.isEnabled)
+    {
+        g.setColour (Palette::amber.withAlpha (0.30f));
+        g.fillRect (r);
+    }
+
+    g.setColour (! item.isEnabled
+                     ? Palette::creamDim.withAlpha (0.4f)
+                     : (isHighlighted ? Palette::cream : Palette::creamDim));
+    // Mark the active preset with a small brass dot in the left gutter.
+    auto gutter = r.removeFromLeft (14);
+    if (item.isTicked)
+    {
+        g.setColour (Palette::amber);
+        g.fillEllipse (gutter.toFloat().withSizeKeepingCentre (5.0f, 5.0f));
+        g.setColour (Palette::cream);
+    }
+
+    g.setFont (getPopupMenuFont());
+    g.drawFittedText (item.text, r.reduced (2, 0), juce::Justification::centredLeft, 1);
+}
+
+juce::Font GlintLookAndFeel::getPopupMenuFont()
+{
+    return { withDefaultMetrics (juce::FontOptions (13.0f)) };
+}
+
 juce::Point<float> GlintLookAndFeel::pointAt (juce::Point<float> centre, float radius,
                                               float angleRadians) noexcept
 {

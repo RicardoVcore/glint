@@ -2,9 +2,12 @@
 // each check prints PASS/FAIL and the process exit code is the failure count.
 #include "GlintDsp.h"
 #include "PluginProcessor.h"
+#include "ReferenceSignal.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <numeric>
@@ -611,6 +614,126 @@ void testParameterTextRoundTrip()
 }
 
 //------------------------------------------------------------------------------
+// Factory presets: calibrated by measured gain reduction (tests 10, 11).
+
+void testPresetAccuracy()
+{
+    std::puts ("test 10: calibrated presets hit their GR/loudness targets on the reference signal");
+
+    const auto sig = glint::refsig::makeReferenceSignal();
+
+    // Init (preset 0) keeps the factory defaults and is not calibrated; the
+    // nine calibrated presets must reproduce their measured GR and RMS.
+    for (int i = 1; i < glint::numPresets; ++i)
+    {
+        const auto& preset = glint::factoryPresets[static_cast<size_t> (i)];
+
+        glint::EngineParameters p;
+        p.inputDb = preset.inputDb;
+        p.outputDb = preset.outputDb;
+        p.thresholdKnob = preset.thresholdKnob;
+        p.timeMode = preset.timeMode;
+        p.midSide = preset.midSide;
+        p.sparkle01 = preset.sparklePct / 100.0f;
+        p.mix01 = preset.mixPct / 100.0f;
+
+        const auto m = glint::refsig::measure (p, sig);
+
+        char msg[160];
+        std::snprintf (msg, sizeof (msg),
+                       "%s: mean GR %.2f dB vs target %.2f dB (in %.1f, thr %.2f)",
+                       preset.name, m.meanGrDb, (double) preset.targetGrDb,
+                       (double) preset.inputDb, (double) preset.thresholdKnob);
+        check (std::abs (m.meanGrDb - (double) preset.targetGrDb) <= 1.0, msg);
+
+        std::snprintf (msg, sizeof (msg),
+                       "%s: output RMS %.2f dB vs input %.2f dB (loudness match)",
+                       preset.name, m.outRmsDb, m.inRmsDb);
+        check (std::abs (m.outRmsDb - m.inRmsDb) <= 1.0, msg);
+    }
+}
+
+void testPresetProgramRoundTrip()
+{
+    std::puts ("test 11: program selection + preset parameters survive state round-trip");
+
+    GlintAudioProcessor a;
+    const int chosen = 4;   // Drum Smash (parallel)
+    a.setCurrentProgram (chosen);
+
+    check (a.getCurrentProgram() == chosen, "setCurrentProgram(4) selects preset 4");
+
+    const auto& preset = glint::factoryPresets[static_cast<size_t> (chosen)];
+
+    // Applying a preset sets every parameter to the preset's values.
+    bool paramsOk = true;
+    for (const char* id : { "input", "threshold", "sparkle", "mix", "output" })
+    {
+        const float v = a.apvts.getRawParameterValue (id)->load();
+        const float expected = [&]
+        {
+            if (std::strcmp (id, "input") == 0)     return preset.inputDb;
+            if (std::strcmp (id, "threshold") == 0) return preset.thresholdKnob;
+            if (std::strcmp (id, "sparkle") == 0)   return preset.sparklePct;
+            if (std::strcmp (id, "mix") == 0)       return preset.mixPct;
+            return preset.outputDb;
+        }();
+        if (std::abs (v - expected) > 1.0e-3f)
+        {
+            std::printf ("    mismatch %s: %.4f vs expected %.4f\n", id,
+                         (double) v, (double) expected);
+            paramsOk = false;
+        }
+    }
+    const auto* timeA = dynamic_cast<juce::AudioParameterChoice*> (a.apvts.getParameter ("time"));
+    const auto* linkA = dynamic_cast<juce::AudioParameterChoice*> (a.apvts.getParameter ("link"));
+    jassertquiet (timeA != nullptr && linkA != nullptr);
+    if (timeA != nullptr && timeA->getIndex() != preset.timeMode - 1)
+    {
+        std::printf ("    mismatch time: %d vs expected %d\n",
+                     timeA->getIndex(), preset.timeMode - 1);
+        paramsOk = false;
+    }
+    if (linkA != nullptr && linkA->getIndex() != (preset.midSide ? 1 : 0))
+    {
+        std::printf ("    mismatch link\n");
+        paramsOk = false;
+    }
+    check (paramsOk, "setCurrentProgram applies the preset's parameter values");
+
+    juce::MemoryBlock state;
+    a.getStateInformation (state);
+
+    GlintAudioProcessor b;
+    b.setStateInformation (state.getData(), static_cast<int> (state.getSize()));
+
+    check (b.getCurrentProgram() == chosen, "program index restored from state");
+
+    bool restoreOk = true;
+    for (const char* id : { "input", "threshold", "sparkle", "mix", "output" })
+    {
+        const float va = a.apvts.getRawParameterValue (id)->load();
+        const float vb = b.apvts.getRawParameterValue (id)->load();
+        if (std::abs (va - vb) > 1.0e-6f)
+        {
+            std::printf ("    mismatch %s: %.6f vs %.6f\n", id, (double) va, (double) vb);
+            restoreOk = false;
+        }
+    }
+    for (const char* id : { "time", "link" })
+    {
+        const auto va = dynamic_cast<juce::AudioParameterChoice*> (a.apvts.getParameter (id))->getCurrentChoiceName();
+        const auto vb = dynamic_cast<juce::AudioParameterChoice*> (b.apvts.getParameter (id))->getCurrentChoiceName();
+        if (va != vb)
+        {
+            std::printf ("    mismatch %s: %s vs %s\n", id, va.toRawUTF8(), vb.toRawUTF8());
+            restoreOk = false;
+        }
+    }
+    check (restoreOk, "all parameter values restored identically");
+}
+
+//------------------------------------------------------------------------------
 // Stress sweep: one compact table-driven loop over every parameter combination
 // x signal x sample rate.  Guards against nonlinear-stage saturation (the
 // historical bug: sparkle blew loud highs up to near full scale).
@@ -764,6 +887,8 @@ int main()
     testSparkleAir();
     testStateRoundTrip();
     testParameterTextRoundTrip();
+    testPresetAccuracy();
+    testPresetProgramRoundTrip();
     testStressSweep();
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);

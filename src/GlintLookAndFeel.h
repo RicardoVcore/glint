@@ -46,6 +46,22 @@ public:
                            bool shouldDrawButtonAsHighlighted,
                            bool shouldDrawButtonAsDown) override;
 
+    /** Preset combo box: dark inset panel, thin brass outline, cream arrow. */
+    void drawComboBox (juce::Graphics& g, int width, int height, bool isButtonDown,
+                       int buttonX, int buttonY, int buttonW, int buttonH,
+                       juce::ComboBox& box) override;
+    juce::Font getComboBoxFont (juce::ComboBox& box) override;
+    void positionComboBoxText (juce::ComboBox& box, juce::Label& label) override;
+
+    /** Preset popup menu: dark panel with a brass outline, cream items and
+        an amber highlight. */
+    void drawPopupMenuBackgroundWithOptions (juce::Graphics& g, int width, int height,
+                                             const juce::PopupMenu::Options& options) override;
+    void drawPopupMenuItemWithOptions (juce::Graphics& g, const juce::Rectangle<int>& area,
+                                       bool isHighlighted, const juce::PopupMenu::Item& item,
+                                       const juce::PopupMenu::Options& options) override;
+    juce::Font getPopupMenuFont() override;
+
 private:
     /** Point on a circle, using the JUCE convention: angle 0 = 12 o'clock,
         increasing clockwise. */
