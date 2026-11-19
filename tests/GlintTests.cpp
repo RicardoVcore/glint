@@ -508,6 +508,108 @@ void testStateRoundTrip()
     check (ok, "all parameter values survive get/set state");
 }
 
+void testParameterTextRoundTrip()
+{
+    std::puts ("test 9: parameter text round-trips and out-of-range input clamps");
+
+    GlintAudioProcessor p;
+
+    // displayStep = the smallest change the formatted text can express.
+    struct Spec { const char* id; float displayStep; };
+    const Spec specs[] { { "input",     0.01f },
+                         { "threshold", 0.1f  },
+                         { "sparkle",   1.0f  },
+                         { "mix",       1.0f  },
+                         { "output",    0.01f } };
+
+    for (const auto& spec : specs)
+    {
+        auto* pf = dynamic_cast<juce::AudioParameterFloat*> (p.apvts.getParameter (spec.id));
+        jassertquiet (pf != nullptr);
+        if (pf == nullptr)
+        {
+            check (false, "float parameter found");
+            continue;
+        }
+
+        // getText/getValueForText are private overrides on AudioParameterFloat;
+        // call them through the public AudioProcessorParameter interface.
+        auto& param = static_cast<juce::AudioProcessorParameter&> (*pf);
+
+        // getText(value) -> getValueForText(text) must land within one
+        // display step of the original value.
+        const float v = pf->get();
+        const juce::String text = param.getText (pf->convertTo0to1 (v), 64);
+        const float back = pf->convertFrom0to1 (param.getValueForText (text));
+
+        char msg[128];
+        std::snprintf (msg, sizeof (msg), "%s: \"%s\" -> %.3f (was %.3f)",
+                       spec.id, text.toRawUTF8(), (double) back, (double) v);
+        check (std::abs (back - v) <= spec.displayStep + 1.0e-4f, msg);
+
+        // getValueForText("999") must clamp to the parameter maximum.
+        const float clamped = pf->convertFrom0to1 (param.getValueForText ("999"));
+        const float rangeMax = pf->getNormalisableRange().end;
+        std::snprintf (msg, sizeof (msg), "%s: \"999\" clamps to max %.2f",
+                       spec.id, (double) rangeMax);
+        check (std::abs (clamped - rangeMax) < 1.0e-4f, msg);
+    }
+
+    // Typo-tolerant parsing on a dB parameter: bare numbers, units and
+    // explicit signs all resolve to the same value.
+    auto* input = dynamic_cast<juce::AudioParameterFloat*> (p.apvts.getParameter ("input"));
+    jassertquiet (input != nullptr);
+    auto& inputParam = static_cast<juce::AudioProcessorParameter&> (*input);
+    auto parsesTo = [&inputParam, &input] (const char* text)
+    {
+        return input->convertFrom0to1 (inputParam.getValueForText (text));
+    };
+    check (std::abs (parsesTo ("3") - 3.0f) < 0.01f, "input \"3\" -> 3 dB");
+    check (std::abs (parsesTo ("3 dB") - 3.0f) < 0.01f, "input \"3 dB\" -> 3 dB");
+    check (std::abs (parsesTo ("+3.0") - 3.0f) < 0.01f, "input \"+3.0\" -> 3 dB");
+
+    // Same round-trip at one non-default value per parameter (the value box
+    // has to survive what the user typed, not just the default), including
+    // a negative dB value.
+    struct NonDefaultSpec { const char* id; float value; float displayStep; };
+    const NonDefaultSpec nonDefaults[] { { "input",     -3.567f, 0.01f },
+                                         { "threshold",  7.5f,   0.1f  },
+                                         { "sparkle",    77.0f,  1.0f  },
+                                         { "mix",        33.0f,  1.0f  },
+                                         { "output",     -8.25f, 0.01f } };
+
+    for (const auto& spec : nonDefaults)
+    {
+        auto* pf = dynamic_cast<juce::AudioParameterFloat*> (p.apvts.getParameter (spec.id));
+        jassertquiet (pf != nullptr);
+        if (pf == nullptr)
+        {
+            check (false, "float parameter found");
+            continue;
+        }
+
+        *pf = spec.value;
+        auto& param = static_cast<juce::AudioProcessorParameter&> (*pf);
+        const juce::String text = param.getText (pf->convertTo0to1 (spec.value), 64);
+        const float back = pf->convertFrom0to1 (param.getValueForText (text));
+
+        char msg[128];
+        std::snprintf (msg, sizeof (msg), "%s: %+.3f renders \"%s\" -> %.3f",
+                       spec.id, (double) spec.value, text.toRawUTF8(), (double) back);
+        check (std::abs (back - spec.value) <= spec.displayStep + 1.0e-4f, msg);
+    }
+
+    // The negative dB case must format with an explicit sign and two decimals.
+    {
+        auto* pf = dynamic_cast<juce::AudioParameterFloat*> (p.apvts.getParameter ("input"));
+        jassertquiet (pf != nullptr);
+        *pf = -3.567f;
+        auto& param = static_cast<juce::AudioProcessorParameter&> (*pf);
+        const juce::String text = param.getText (pf->convertTo0to1 (-3.567f), 64);
+        check (text == "-3.57 dB", "input -3.567 shows \"-3.57 dB\"");
+    }
+}
+
 //------------------------------------------------------------------------------
 // Stress sweep: one compact table-driven loop over every parameter combination
 // x signal x sample rate.  Guards against nonlinear-stage saturation (the
@@ -661,6 +763,7 @@ int main()
     testMidSideIdentical();
     testSparkleAir();
     testStateRoundTrip();
+    testParameterTextRoundTrip();
     testStressSweep();
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);

@@ -6,7 +6,8 @@
 
 /** Glint — variable-mu tube compressor (Glint Audio).
 
-    VST3 + Standalone; UI for this slice is juce::GenericAudioProcessorEditor.
+    VST3 + AU + Standalone; custom hardware-style faceplate editor
+    (see GlintEditor).
 */
 class GlintAudioProcessor : public juce::AudioProcessor
 {
@@ -19,10 +20,7 @@ public:
 
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
 
-    juce::AudioProcessorEditor* createEditor() override
-    {
-        return new juce::GenericAudioProcessorEditor (*this);
-    }
+    juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
     const juce::String getName() const override { return "Glint"; }
@@ -40,10 +38,10 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
-    /** Current gain reduction in dB, for a future meter. */
+    /** Current gain reduction in dB, for the editor meter. */
     std::atomic<float>& getGainReductionDb() noexcept { return engine.gainReductionDb; }
 
-    // Exposed for tests and a future custom UI.
+    // Exposed for tests.
     juce::AudioProcessorValueTreeState apvts;
 
 private:
