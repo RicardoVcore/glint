@@ -89,11 +89,18 @@ void GlintLookAndFeel::drawToggleButton (juce::Graphics& g, juce::ToggleButton& 
                                          bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown)
 {
     juce::ignoreUnused (shouldDrawButtonAsDown);
-    auto bounds = button.getLocalBounds().toFloat();
-    const auto centre = bounds.getCentre();
+    // The button bounds are the recessed mounting plate: dark inset rounded
+    // rect with a thin brass outline, matching the knob value boxes.
+    const auto plate = button.getLocalBounds().toFloat();
+    const auto centre = plate.getCentre();
     const bool midSide = button.getToggleState();
 
-    // Vertical two-position switch slot.
+    g.setColour (Palette::knobBodyDark);
+    g.fillRoundedRectangle (plate, 5.0f);
+    g.setColour (Palette::brassDim);
+    g.drawRoundedRectangle (plate.reduced (1.0f), 5.0f, 1.0f);
+
+    // Vertical two-position switch slot, centred on the plate.
     const auto slot = juce::Rectangle<float> (12.0f, 24.0f).withCentre (centre);
     g.setColour (juce::Colours::black.withAlpha (0.55f));
     g.fillRoundedRectangle (slot, 6.0f);
@@ -112,12 +119,14 @@ void GlintLookAndFeel::drawToggleButton (juce::Graphics& g, juce::ToggleButton& 
     g.setColour (Palette::brassDim);
     g.drawEllipse (ellipse (leverCentre, 6.5f), 1.0f);
 
-    // Labels: active position cream, inactive dimmed.
+    // Labels: active position cream, inactive dimmed, nudged clear of the
+    // plate outline.
     g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold).withKerningFactor (0.10f)));
+    auto labelArea = plate.reduced (6.0f, 2.0f);
     g.setColour (midSide ? Palette::creamDim : Palette::cream);
-    g.drawText ("STEREO", bounds.removeFromTop (12.0f), juce::Justification::centred);
+    g.drawText ("STEREO", labelArea.removeFromTop (12.0f), juce::Justification::centred);
     g.setColour (midSide ? Palette::cream : Palette::creamDim);
-    g.drawText ("M-S", bounds.removeFromBottom (12.0f), juce::Justification::centred);
+    g.drawText ("M-S", labelArea.removeFromBottom (12.0f), juce::Justification::centred);
 }
 
 juce::Label* GlintLookAndFeel::createSliderTextBox (juce::Slider& slider)

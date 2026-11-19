@@ -41,7 +41,7 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KnobSlider)
 };
 
-/** Glint custom editor: a fixed 760 x 400 hardware faceplate with rotary
+/** Glint custom editor: a fixed 760 x 430 hardware faceplate with rotary
     knobs and an analog gain-reduction meter. */
 class GlintEditor : public juce::AudioProcessorEditor,
                     private juce::Timer
@@ -78,7 +78,8 @@ private:
     };
 
     std::array<Knob, 6> knobs {};
-    juce::ToggleButton linkSwitch;
+    juce::Label linkLabel;          // "LINK" caption above the switch plate
+    juce::ToggleButton linkSwitch;  // bounds = the recessed plate itself
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         inputAttach, thresholdAttach, timeAttach, sparkleAttach, mixAttach, outputAttach;

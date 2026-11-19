@@ -567,6 +567,47 @@ void testParameterTextRoundTrip()
     check (std::abs (parsesTo ("3") - 3.0f) < 0.01f, "input \"3\" -> 3 dB");
     check (std::abs (parsesTo ("3 dB") - 3.0f) < 0.01f, "input \"3 dB\" -> 3 dB");
     check (std::abs (parsesTo ("+3.0") - 3.0f) < 0.01f, "input \"+3.0\" -> 3 dB");
+
+    // Same round-trip at one non-default value per parameter (the value box
+    // has to survive what the user typed, not just the default), including
+    // a negative dB value.
+    struct NonDefaultSpec { const char* id; float value; float displayStep; };
+    const NonDefaultSpec nonDefaults[] { { "input",     -3.567f, 0.01f },
+                                         { "threshold",  7.5f,   0.1f  },
+                                         { "sparkle",    77.0f,  1.0f  },
+                                         { "mix",        33.0f,  1.0f  },
+                                         { "output",     -8.25f, 0.01f } };
+
+    for (const auto& spec : nonDefaults)
+    {
+        auto* pf = dynamic_cast<juce::AudioParameterFloat*> (p.apvts.getParameter (spec.id));
+        jassertquiet (pf != nullptr);
+        if (pf == nullptr)
+        {
+            check (false, "float parameter found");
+            continue;
+        }
+
+        *pf = spec.value;
+        auto& param = static_cast<juce::AudioProcessorParameter&> (*pf);
+        const juce::String text = param.getText (pf->convertTo0to1 (spec.value), 64);
+        const float back = pf->convertFrom0to1 (param.getValueForText (text));
+
+        char msg[128];
+        std::snprintf (msg, sizeof (msg), "%s: %+.3f renders \"%s\" -> %.3f",
+                       spec.id, (double) spec.value, text.toRawUTF8(), (double) back);
+        check (std::abs (back - spec.value) <= spec.displayStep + 1.0e-4f, msg);
+    }
+
+    // The negative dB case must format with an explicit sign and two decimals.
+    {
+        auto* pf = dynamic_cast<juce::AudioParameterFloat*> (p.apvts.getParameter ("input"));
+        jassertquiet (pf != nullptr);
+        *pf = -3.567f;
+        auto& param = static_cast<juce::AudioProcessorParameter&> (*pf);
+        const juce::String text = param.getText (pf->convertTo0to1 (-3.567f), 64);
+        check (text == "-3.57 dB", "input -3.567 shows \"-3.57 dB\"");
+    }
 }
 
 //------------------------------------------------------------------------------

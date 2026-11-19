@@ -25,7 +25,7 @@ int main (int argc, char* argv[])
         std::cerr << "createEditor() returned nullptr\n";
         return 1;
     }
-    editor->setSize (760, 400);
+    // The editor fixes its own faceplate size in its constructor.
 
     // Drive the meter ballistics with a sustained 6.5 dB reduction so the
     // snapshot shows the needle mid-scale.
@@ -34,7 +34,8 @@ int main (int argc, char* argv[])
         for (int i = 0; i < 45; ++i)
             ge->tickMeter();
 
-    const auto snapshot = editor->createComponentSnapshot ({ 760, 400 }, true);
+    const auto snapshot = editor->createComponentSnapshot (
+        { editor->getWidth(), editor->getHeight() }, true);
     if (snapshot.isNull())
     {
         std::cerr << "createComponentSnapshot failed\n";

@@ -54,7 +54,10 @@ GlintEditor::GlintEditor (GlintAudioProcessor& p)
       linkAttach      (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (p.apvts, "link", linkSwitch))
 {
     setLookAndFeel (&lookAndFeel);
-    setSize (760, 400);
+    // Extra depth below the knob row keeps the value boxes and the bottom
+    // corner screws clear of the brass outline (boxes end at y 366, outline
+    // at y 420, screws span y 402-414).
+    setSize (760, 430);
     setResizable (false, false);
 
     const int knobCentreY = 281;
@@ -90,7 +93,18 @@ GlintEditor::GlintEditor (GlintAudioProcessor& p)
         x += (float) spec.size + 44.0f;
     }
 
-    linkSwitch.setBounds (505, 186, 140, 48);
+    // Link switch on a recessed plate, centred under the meter (centre
+    // x 575): "LINK" caption in the knob-label style, plate below it.  The
+    // button bounds are the plate, so a click anywhere on it toggles.
+    linkLabel.setText ("LINK", juce::dontSendNotification);
+    linkLabel.setJustificationType (juce::Justification::centred);
+    linkLabel.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold).withKerningFactor (0.12f)));
+    linkLabel.setColour (juce::Label::textColourId, Palette::cream);
+    linkLabel.setBounds (515, 177, 120, 14);
+    linkLabel.setInterceptsMouseClicks (false, false); // let plate clicks through
+    addAndMakeVisible (linkLabel);
+
+    linkSwitch.setBounds (517, 194, 116, 48);
     addAndMakeVisible (linkSwitch);
 
     // 30 Hz meter polling with editor-side ballistics.
