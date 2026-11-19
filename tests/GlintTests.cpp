@@ -1,0 +1,417 @@
+// Plain test executable for the Glint DSP slice. No test framework:
+// each check prints PASS/FAIL and the process exit code is the failure count.
+#include "GlintDsp.h"
+#include "PluginProcessor.h"
+
+#include <cstdint>
+#include <cstdio>
+#include <vector>
+#include <numeric>
+#include <algorithm>
+
+namespace
+{
+
+constexpr double fs = 48000.0;
+constexpr int blockSize = 256;
+
+int failures = 0;
+
+void check (bool ok, const char* what)
+{
+    std::printf ("  %s  %s\n", ok ? "PASS" : "FAIL", what);
+    if (! ok)
+        ++failures;
+}
+
+glint::EngineParameters baseParams()
+{
+    glint::EngineParameters p; // defaults, except sparkle off for clean GR reads
+    p.sparkle01 = 0.0f;
+    return p;
+}
+
+float noiseSample (std::uint32_t& s)
+{
+    s = s * 1664525u + 1013904223u;
+    return static_cast<float> (s >> 8) / 8388608.0f - 1.0f; // [-1, 1)
+}
+
+// Deterministic per-(channel, sample) noise, so multi-channel fills are identical
+// across channels when they need to be, and reproducible run to run.
+float noiseAt (int c, int i)
+{
+    std::uint32_t h = static_cast<std::uint32_t> (c) * 747796405u
+                    + static_cast<std::uint32_t> (i) * 668265263u + 2891336453u;
+    h ^= h >> 13; h *= 1274126177u; h ^= h >> 16;
+    return static_cast<float> (h >> 8) / 8388608.0f - 1.0f; // [-1, 1)
+}
+
+struct Capture
+{
+    std::vector<float> ch[2];
+};
+
+template <typename FillFn>
+void run (glint::Engine& engine, int numSamples, int numChannels, FillFn&& fill, Capture& out)
+{
+    juce::AudioBuffer<float> buf (numChannels, blockSize);
+    int produced = 0;
+    while (produced < numSamples)
+    {
+        const int n = juce::jmin (blockSize, numSamples - produced);
+        buf.setSize (numChannels, n, false, false, false);
+        for (int c = 0; c < numChannels; ++c)
+        {
+            auto* w = buf.getWritePointer (c);
+            for (int i = 0; i < n; ++i)
+                w[i] = fill (c, produced + i);
+        }
+        engine.process (buf);
+        for (int c = 0; c < numChannels; ++c)
+        {
+            const auto* r = buf.getReadPointer (c);
+            out.ch[c].insert (out.ch[c].end(), r, r + n);
+        }
+        produced += n;
+    }
+}
+
+auto sineFill (double freq, float amp)
+{
+    return [freq, amp] (int, int i)
+    {
+        const double t = static_cast<double> (i) / fs;
+        return amp * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * freq * t));
+    };
+}
+
+double peakOf (const std::vector<float>& v, int from, int to)
+{
+    double p = 0.0;
+    for (int i = from; i < to && i < static_cast<int> (v.size()); ++i)
+        p = juce::jmax (p, std::abs (static_cast<double> (v[static_cast<size_t> (i)])));
+    return p;
+}
+
+bool allFinite (const std::vector<float>& v)
+{
+    for (float x : v)
+        if (! std::isfinite (x))
+            return false;
+    return true;
+}
+
+// Simple RBJ highpass biquad, used offline to measure energy above 10 kHz.
+double rmsAbove10k (const std::vector<float>& v)
+{
+    const double f0 = 10000.0, Q = 0.7071;
+    const double w0 = 2.0 * juce::MathConstants<double>::pi * f0 / fs;
+    const double cw = std::cos (w0), sw = std::sin (w0), alpha = sw / (2.0 * Q);
+    const double a0 = 1.0 + alpha;
+    const double b0 = (1.0 + cw) / 2.0 / a0, b1 = -(1.0 + cw) / a0, b2 = b0;
+    const double a1 = -2.0 * cw / a0, a2 = (1.0 - alpha) / a0;
+
+    double x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0, sum = 0.0;
+    for (float xIn : v)
+    {
+        const double x = xIn;
+        const double y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1; x1 = x; y2 = y1; y1 = y;
+        sum += y * y;
+    }
+    return std::sqrt (sum / static_cast<double> (v.size()));
+}
+
+//------------------------------------------------------------------------------
+
+void testSilenceAndFinite()
+{
+    std::puts ("test 1: silence in -> silence out; finite on full-scale noise");
+
+    {
+        glint::Engine e;
+        e.prepare (fs, blockSize);
+        e.setParameters (baseParams());
+
+        Capture cap;
+        run (e, 3 * blockSize, 2, [] (int, int) { return 0.0f; }, cap);
+        bool silent = true;
+        for (int c = 0; c < 2; ++c)
+            for (float x : cap.ch[c])
+                if (std::abs (x) > 1.0e-9f)
+                    silent = false;
+        check (silent, "silence gives silence (|y| < 1e-9)");
+    }
+
+    {
+        glint::Engine e;
+        e.prepare (fs, blockSize);
+        e.setParameters (baseParams());
+
+        std::uint32_t seed = 0x1234567u;
+        Capture cap;
+        run (e, fs, 2, [&seed] (int c, int i) { return noiseAt (c, i); }, cap);
+
+        bool finite = true, bounded = true;
+        for (int c = 0; c < 2; ++c)
+        {
+            if (! allFinite (cap.ch[c]))
+                finite = false;
+            if (peakOf (cap.ch[c], 0, (int) cap.ch[c].size()) > 4.0)
+                bounded = false;
+        }
+        check (finite, "full-scale noise: no NaN/Inf");
+        check (bounded, "full-scale noise: output stays bounded");
+    }
+}
+
+void testGrOrdering()
+{
+    std::puts ("test 2: GR rises with input level (1 kHz sustained sine)");
+
+    auto grFor = [] (float inputDb)
+    {
+        glint::Engine e;
+        e.prepare (fs, blockSize);
+        auto p = baseParams();
+        p.inputDb = inputDb;
+        p.timeMode = 1;
+        e.setParameters (p);
+
+        const int numSamples = static_cast<int> (2.0 * fs);
+        Capture cap;
+        run (e, numSamples, 1, sineFill (1000.0, 0.25f), cap);
+
+        const int from = static_cast<int> (1.5 * fs);
+        const double inPeak = 0.25 * std::pow (10.0, inputDb / 20.0);
+        const double outPeak = peakOf (cap.ch[0], from, numSamples);
+        return 20.0 * std::log10 (inPeak / outPeak);
+    };
+
+    const double gr12 = grFor (12.0f);
+    const double gr0 = grFor (0.0f);
+    const double grM20 = grFor (-20.0f);
+
+    std::printf ("    GR: +12 dB -> %.2f dB, 0 dB -> %.2f dB, -20 dB -> %.2f dB\n",
+                 gr12, gr0, grM20);
+
+    check (gr12 > gr0 + 1.0, "GR(+12) > GR(0) + 1 dB");
+    check (gr0 > grM20 + 0.5, "GR(0) > GR(-20) + 0.5 dB");
+    check (grM20 < 0.3, "GR(-20) ~ 0 (< 0.3 dB)");
+}
+
+void testReleaseOrdering()
+{
+    std::puts ("test 3: release ordering (time=4 releases slower than time=1)");
+
+    auto residualGr = [] (int timeMode)
+    {
+        glint::Engine e;
+        e.prepare (fs, blockSize);
+        auto p = baseParams();
+        p.timeMode = timeMode;
+        e.setParameters (p);
+
+        Capture cap;
+        run (e, static_cast<int> (fs), 1, sineFill (1000.0, 1.0f), cap);   // burst
+        run (e, static_cast<int> (0.2 * fs), 1, [] (int, int) { return 0.0f; }, cap);
+        return static_cast<double> (e.gainReductionDb.load());
+    };
+
+    const double gr1 = residualGr (1);
+    const double gr4 = residualGr (4);
+    std::printf ("    residual GR @200ms: time=1 -> %.2f dB, time=4 -> %.2f dB\n", gr1, gr4);
+
+    check (gr4 > gr1 + 2.0, "residual GR(time=4) > residual GR(time=1) + 2 dB");
+    check (gr1 > 0.1, "time=1 still shows residual GR after 200 ms");
+}
+
+void testMixZeroNull()
+{
+    std::puts ("test 4: mix=0 equals latency-delayed input (null < -80 dB)");
+
+    glint::Engine e;
+    e.prepare (fs, blockSize);
+    auto p = baseParams();
+    p.mix01 = 0.0f;
+    e.setParameters (p);
+
+    std::uint32_t seed = 0xdeadbeefu;
+    std::vector<float> in;
+    in.reserve (static_cast<size_t> (fs));
+    for (int i = 0; i < static_cast<int> (fs); ++i)
+        in.push_back (noiseSample (seed));
+
+    Capture cap;
+    run (e, static_cast<int> (fs), 2, [&in] (int, int i) { return in[static_cast<size_t> (i)]; }, cap);
+
+    const int delay = e.getLatencySamples();
+    std::printf ("    reported latency: %d samples\n", delay);
+
+    double sigSum = 0.0, errSum = 0.0;
+    for (int i = delay; i < static_cast<int> (in.size()); ++i)
+    {
+        const double d = static_cast<double> (cap.ch[0][static_cast<size_t> (i)])
+                       - static_cast<double> (in[static_cast<size_t> (i - delay)]);
+        errSum += d * d;
+        sigSum += static_cast<double> (in[static_cast<size_t> (i)]) * in[static_cast<size_t> (i)];
+    }
+    const double nullDb = -10.0 * std::log10 (errSum / sigSum);
+    std::printf ("    null: %.1f dB\n", nullDb);
+    check (nullDb > 80.0, "null against delayed input better than -80 dB");
+}
+
+void testMidSideIdentical()
+{
+    std::puts ("test 5: mid/side with identical L and R gives L == R");
+
+    glint::Engine e;
+    e.prepare (fs, blockSize);
+    auto p = baseParams();
+    p.midSide = true;
+    e.setParameters (p);
+
+    Capture cap;
+    run (e, static_cast<int> (fs), 2,
+         [] (int, int i) { return 0.4f * noiseAt (0, i); }, cap);
+
+    double maxDiff = 0.0;
+    const size_t count = juce::jmin (cap.ch[0].size(), cap.ch[1].size());
+    for (size_t i = 0; i < count; ++i)
+        maxDiff = juce::jmax (maxDiff, static_cast<double> (std::abs (cap.ch[0][i] - cap.ch[1][i])));
+    std::printf ("    max |L-R| = %.3g\n", maxDiff);
+    check (maxDiff < 1.0e-9f, "L == R (max diff < 1e-9)");
+}
+
+void testSparkleAir()
+{
+    std::puts ("test 6: sparkle=100 gives more energy above 10 kHz than sparkle=0");
+
+    auto runWith = [] (float sparkle, double& grOut)
+    {
+        glint::Engine e;
+        e.prepare (fs, blockSize);
+        auto p = baseParams();
+        p.sparkle01 = sparkle;
+        p.inputDb = 6.0f;
+        e.setParameters (p);
+
+        Capture cap;
+        run (e, static_cast<int> (fs), 2,
+             [] (int c, int i) { return 0.5f * noiseAt (c, i); }, cap);
+        grOut = static_cast<double> (e.gainReductionDb.load());
+        return rmsAbove10k (cap.ch[0]);
+    };
+
+    double gr0 = 0.0, gr100 = 0.0;
+    const double rms0 = runWith (0.0f, gr0);
+    const double rms100 = runWith (1.0f, gr100);
+    std::printf ("    rms>10k: sparkle=0 -> %.5g, sparkle=100 -> %.5g (GR %.1f / %.1f dB)\n",
+                 rms0, rms100, gr0, gr100);
+
+    check (gr0 > 1.0 && gr100 > 1.0, "both runs are under compression (GR > 1 dB)");
+    // The old band^2 saturator produced air ABOVE the >7 kHz band level
+    // (+1.9 dB rms on this signal), hence the old 1.2x threshold.  The
+    // level-tracking generator deliberately adds air well below the band
+    // (~13 dB at sparkle=100), so the expected rise is correspondingly
+    // smaller; the +1 dB peak regression below guards the explosion mode.
+    check (rms100 > rms0 * 1.01, "sparkle=100 raises >10 kHz energy");
+
+    // Regression: the old band^2 saturator exploded on loud HF material
+    // (near full-scale air once the band hit ~-26 dBFS).  With the
+    // level-tracking generator, a loud (-6 dBFS) 9 kHz sine at sparkle=100
+    // must add less than 1 dB of peak over sparkle=0.
+    auto sinePeak = [] (float sparkle)
+    {
+        glint::Engine e;
+        e.prepare (fs, blockSize);
+        auto p = baseParams();
+        p.sparkle01 = sparkle;
+        e.setParameters (p);
+
+        Capture cap;
+        run (e, static_cast<int> (fs), 2, sineFill (9000.0, 0.5f), cap);
+        return peakOf (cap.ch[0], static_cast<int> (0.5 * fs), static_cast<int> (fs));
+    };
+
+    const double pk0 = sinePeak (0.0f);
+    const double pk100 = sinePeak (1.0f);
+    std::printf ("    9 kHz peak: sparkle=0 -> %.4f, sparkle=100 -> %.4f (%+.2f dB)\n",
+                 pk0, pk100, 20.0 * std::log10 (pk100 / pk0));
+    check (pk100 < pk0 * 1.12202, "loud 9 kHz sine: sparkle=100 peak < +1 dB vs sparkle=0");
+}
+
+void testStateRoundTrip()
+{
+    std::puts ("test 7: state round-trip preserves all parameter values");
+
+    GlintAudioProcessor a;
+
+    auto setFloat = [] (GlintAudioProcessor& p, const char* id, float v)
+    {
+        auto* pf = dynamic_cast<juce::AudioParameterFloat*> (p.apvts.getParameter (id));
+        jassertquiet (pf != nullptr);
+        *pf = v;
+    };
+    auto setChoice = [] (GlintAudioProcessor& p, const char* id, int v)
+    {
+        auto* pc = dynamic_cast<juce::AudioParameterChoice*> (p.apvts.getParameter (id));
+        jassertquiet (pc != nullptr);
+        pc->setValueNotifyingHost (pc->convertTo0to1 (static_cast<float> (v)));
+    };
+
+    setFloat (a, "input", 6.5f);
+    setFloat (a, "threshold", 7.5f);
+    setChoice (a, "time", 4);
+    setChoice (a, "link", 1);
+    setFloat (a, "sparkle", 77.0f);
+    setFloat (a, "mix", 33.0f);
+    setFloat (a, "output", -8.25f);
+
+    juce::MemoryBlock state;
+    a.getStateInformation (state);
+
+    GlintAudioProcessor b;
+    b.setStateInformation (state.getData(), static_cast<int> (state.getSize()));
+
+    bool ok = true;
+    for (const char* id : { "input", "threshold", "sparkle", "mix", "output" })
+    {
+        const float va = a.apvts.getRawParameterValue (id)->load();
+        const float vb = b.apvts.getRawParameterValue (id)->load();
+        if (std::abs (va - vb) > 1.0e-6f)
+        {
+            std::printf ("    mismatch %s: %.6f vs %.6f\n", id, (double) va, (double) vb);
+            ok = false;
+        }
+    }
+    for (const char* id : { "time", "link" })
+    {
+        const auto va = dynamic_cast<juce::AudioParameterChoice*> (a.apvts.getParameter (id))->getCurrentChoiceName();
+        const auto vb = dynamic_cast<juce::AudioParameterChoice*> (b.apvts.getParameter (id))->getCurrentChoiceName();
+        if (va != vb)
+        {
+            std::printf ("    mismatch %s: %s vs %s\n", id, va.toRawUTF8(), vb.toRawUTF8());
+            ok = false;
+        }
+    }
+
+    check (ok, "all parameter values survive get/set state");
+}
+
+} // namespace
+
+int main()
+{
+    testSilenceAndFinite();
+    testGrOrdering();
+    testReleaseOrdering();
+    testMixZeroNull();
+    testMidSideIdentical();
+    testSparkleAir();
+    testStateRoundTrip();
+
+    std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);
+    return failures == 0 ? 0 : 1;
+}
