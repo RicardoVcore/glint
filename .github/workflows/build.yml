@@ -40,6 +40,15 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure -C Release
 
+      - name: Verify macOS signatures
+        if: runner.os == 'macOS'
+        run: |
+          for b in build/Glint_artefacts/Release/VST3/Glint.vst3 \
+                   build/Glint_artefacts/Release/AU/Glint.component \
+                   build/Glint_artefacts/Release/Standalone/Glint.app; do
+            codesign --verify --strict --deep --verbose=2 "$b"
+          done
+
       - uses: actions/upload-artifact@v7
         with:
           name: Glint-${{ runner.os }}

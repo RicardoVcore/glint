@@ -52,6 +52,15 @@ target_compile_options (Glint PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4>
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra>)
 
+# macOS refuses bundles changed after signing ("sealed resource missing"):
+# the linker ad-hoc signs, then JUCE writes moduleinfo.json post-link. Re-sign last.
+if (APPLE)
+    foreach (format VST3 AU Standalone)
+        add_custom_command (TARGET Glint_${format} POST_BUILD
+            COMMAND codesign --force --sign - "$<TARGET_PROPERTY:Glint_${format},JUCE_PLUGIN_ARTEFACT_FILE>")
+    endforeach ()
+endif ()
+
 add_executable (glint_tests tests/GlintTests.cpp)
 
 target_link_libraries (glint_tests PRIVATE Glint)
