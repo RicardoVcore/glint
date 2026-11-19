@@ -57,7 +57,7 @@ target_compile_options (Glint PRIVATE
 if (APPLE)
     foreach (format VST3 AU Standalone)
         add_custom_command (TARGET Glint_${format} POST_BUILD
-            COMMAND codesign --force --sign - "$<TARGET_PROPERTY:Glint_${format},JUCE_PLUGIN_ARTEFACT_FILE>")
+            COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:Glint_${format}>")
     endforeach ()
 endif ()
 
