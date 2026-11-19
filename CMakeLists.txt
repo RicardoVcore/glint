@@ -24,7 +24,7 @@ juce_add_plugin (Glint
     DESCRIPTION               "Variable-mu tube compressor"
     PLUGIN_MANUFACTURER_CODE  Glap
     PLUGIN_CODE               Glnt
-    FORMATS                   VST3 Standalone
+    FORMATS                   VST3 AU Standalone
     PRODUCT_NAME              "Glint"
     BUNDLE_ID                 com.glintaudio.glint
     IS_SYNTH                  FALSE

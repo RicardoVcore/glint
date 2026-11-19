@@ -45,4 +45,5 @@ jobs:
           name: Glint-${{ runner.os }}
           path: |
             build/Glint_artefacts/Release/VST3/Glint.vst3
+            build/Glint_artefacts/Release/AU/Glint.component
             build/Glint_artefacts/Release/Standalone/

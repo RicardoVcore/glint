@@ -18,6 +18,8 @@ To install the plugin, copy `Glint.vst3` to the system VST3 folder:
 - Windows: `C:\Program Files\Common Files\VST3`
 - Linux: `~/.vst3`
 
+macOS also gets an Audio Unit: copy `Glint.component` to `~/Library/Audio/Plug-Ins/Components`.
+
 macOS builds are unsigned. Before loading, clear the quarantine flag:
 
 ```sh
