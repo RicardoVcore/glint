@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <string>
 #include <vector>
 #include <numeric>
 #include <algorithm>
@@ -84,6 +85,14 @@ auto sineFill (double freq, float amp)
         const double t = static_cast<double> (i) / fs;
         return amp * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * freq * t));
     };
+}
+
+// Sample i of a -6 dBFS sine at an arbitrary sample rate (stress sweep).
+float sineAt (double freq, int i, double sr)
+{
+    constexpr float amp = 0.501187f;   // -6 dBFS
+    return amp * static_cast<float> (
+        std::sin (2.0 * juce::MathConstants<double>::pi * freq * static_cast<double> (i) / sr));
 }
 
 double peakOf (const std::vector<float>& v, int from, int to)
@@ -400,6 +409,148 @@ void testStateRoundTrip()
     check (ok, "all parameter values survive get/set state");
 }
 
+//------------------------------------------------------------------------------
+// Stress sweep: one compact table-driven loop over every parameter combination
+// x signal x sample rate.  Guards against nonlinear-stage saturation (the
+// historical bug: sparkle blew loud highs up to near full scale).
+
+void testStressSweep()
+{
+    std::puts ("test 8: stress sweep (time x link x sparkle x input x threshold x signal x rate)");
+
+    struct Sig
+    {
+        const char* name;
+        bool isSilence;
+        float (*fill) (int c, int i, double sr);
+    };
+
+    const Sig sigs[] =
+    {
+        { "silence",       true,  [] (int, int, double) { return 0.0f; } },
+        { "100 Hz L=R",    false, [] (int, int i, double sr) { return sineAt (100.0, i, sr); } },
+        { "1 kHz L=R",     false, [] (int, int i, double sr) { return sineAt (1000.0, i, sr); } },
+        { "9 kHz L=R",     false, [] (int, int i, double sr) { return sineAt (9000.0, i, sr); } },
+        { "100 Hz L-only", false, [] (int c, int i, double sr) { return c == 0 ? sineAt (100.0, i, sr) : 0.0f; } },
+        { "1 kHz L-only",  false, [] (int c, int i, double sr) { return c == 0 ? sineAt (1000.0, i, sr) : 0.0f; } },
+        { "9 kHz L-only",  false, [] (int c, int i, double sr) { return c == 0 ? sineAt (9000.0, i, sr) : 0.0f; } },
+        { "noise FS",      false, [] (int c, int i, double) { return noiseAt (c, i); } },
+    };
+    constexpr int numSigs = static_cast<int> (std::size (sigs));
+    constexpr int skipSamples = 4096;      // settling: attack transients excluded
+    constexpr double silenceLimit = 1.0e-9;
+    constexpr double peakLimit = 2.0;      // +6 dBFS
+
+    std::vector<std::string> worstWhere (numSigs);
+    std::vector<double> worstPeak (numSigs, 0.0);
+    int stressFails = 0;
+    int runs = 0;
+
+    auto runOne = [&] (glint::Engine& engine, double sr, const Sig& sig,
+                       int totalSamples, int blockSize, const char* where)
+    {
+        juce::AudioBuffer<float> buf (2, blockSize);
+        double peak = 0.0;
+        bool finite = true;
+        int produced = 0;
+        while (produced < totalSamples)
+        {
+            const int n = juce::jmin (blockSize, totalSamples - produced);
+            buf.setSize (2, n, false, false, false);
+            for (int c = 0; c < 2; ++c)
+            {
+                auto* w = buf.getWritePointer (c);
+                for (int i = 0; i < n; ++i)
+                    w[i] = sig.fill (c, produced + i, sr);
+            }
+            engine.process (buf);
+            for (int c = 0; c < 2; ++c)
+            {
+                const auto* r = buf.getReadPointer (c);
+                for (int i = 0; i < n; ++i)
+                {
+                    if (! std::isfinite (r[i]))
+                        finite = false;
+                    if (produced + i >= skipSamples)
+                        peak = juce::jmax (peak, static_cast<double> (std::abs (r[i])));
+                }
+            }
+            produced += n;
+        }
+
+        ++runs;
+        const double limit = sig.isSilence ? silenceLimit : peakLimit;
+        const bool ok = finite && peak < limit;
+        const size_t si = static_cast<size_t> (&sig - sigs);
+        if (peak > worstPeak[si])
+        {
+            worstPeak[si] = peak;
+            worstWhere[si] = where;
+        }
+        if (! ok)
+        {
+            std::printf ("    FAIL: %s | %s | peak %.6g (limit %.1g)%s\n",
+                         where, sig.name, peak, limit, finite ? "" : " | non-finite output");
+            ++stressFails;
+        }
+    };
+
+    for (const double sr : { 44100.0, 96000.0 })
+        for (int timeMode = 1; timeMode <= glint::numTimeModes; ++timeMode)
+            for (const int msInt : { 0, 1 })
+                for (const float sparkle : { 0.0f, 1.0f })
+                    for (const float inputDb : { 0.0f, 20.0f })
+                        for (const float threshold : { 0.0f, 10.0f })
+                        {
+                            char where[160];
+                            std::snprintf (where, sizeof (where),
+                                           "t%d %s spark%.0f in%+.0f thr%.0f @%.0fk",
+                                           timeMode, msInt ? "M/S" : "ST", sparkle * 100.0f,
+                                           inputDb, threshold, sr * 0.001);
+
+                            glint::Engine e;
+                            e.prepare (sr, 512);
+                            glint::EngineParameters p;   // mix 100, output 0 dB
+                            p.inputDb = inputDb;
+                            p.thresholdKnob = threshold;
+                            p.timeMode = timeMode;
+                            p.midSide = msInt != 0;
+                            p.sparkle01 = sparkle;
+                            e.setParameters (p);
+
+                            const int total = static_cast<int> (0.5 * sr);
+                            for (const auto& sig : sigs)
+                            {
+                                e.reset();
+                                runOne (e, sr, sig, total, 512, where);
+                            }
+                        }
+
+    // Tiny-block spot check: worst-case combo, 1 kHz L=R sine, block size 1.
+    {
+        glint::Engine e;
+        e.prepare (44100.0, 512);
+        glint::EngineParameters p;
+        p.inputDb = 20.0f;
+        p.thresholdKnob = 0.0f;
+        p.timeMode = 6;
+        p.sparkle01 = 1.0f;
+        e.setParameters (p);
+        e.reset();
+        runOne (e, 44100.0, sigs[2], static_cast<int> (0.5 * 44100.0), 1, "t6 ST spark100 in+20 thr0 bs1 @44.1k");
+    }
+
+    std::printf ("    %d runs. Worst-case output peak per signal (after %d-sample settling):\n",
+                 runs, skipSamples);
+    for (int si = 0; si < numSigs; ++si)
+        std::printf ("      %-14s %.4f  (%s)\n", sigs[si].name, worstPeak[si],
+                     worstWhere[si].c_str());
+
+    char msg[64];
+    std::snprintf (msg, sizeof (msg), "stress sweep: %d runs, all finite and bounded", runs);
+    check (stressFails == 0, msg);
+}
+
 } // namespace
 
 int main()
@@ -411,6 +562,7 @@ int main()
     testMidSideIdentical();
     testSparkleAir();
     testStateRoundTrip();
+    testStressSweep();
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);
     return failures == 0 ? 0 : 1;

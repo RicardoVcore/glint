@@ -42,3 +42,9 @@ pluginval (strictness 5):
 ```sh
 ./scripts/check.sh
 ```
+
+## Development rule
+
+Every new nonlinear stage must be covered by the stress test sweep in
+`tests/GlintTests.cpp` (all parameter combinations x worst-case signals,
+sample rates and block sizes).

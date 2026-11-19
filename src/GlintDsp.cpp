@@ -143,6 +143,10 @@ void ColourStage::reset()
     hpAir1.reset();
     hpAir2.reset();
     hfZ = 0.0f;
+    biasTarget = 0.0f;
+    sparkleTarget = 0.0f;
+    bias = 0.0f;
+    sparkle = 0.0f;
 }
 
 void ColourStage::setCharacter (float normGR01, float sparkle01) noexcept
@@ -183,12 +187,14 @@ inline float ColourStage::inner (float x) noexcept
     // >7 kHz band at sparkle=100; highpass again so only the NEW upper
     // harmonics and intermodulation are added, never cancelling the
     // existing highs.
+    // Run the air filters every sample even while the add-back is gated:
+    // a filter whose state freezes while sparkle is off produces a short
+    // transient on re-engagement.  With the add-back gated, sparkle=0 is
+    // still an exact bypass (the filters are linear, zero in -> zero out).
+    const float band = hpAir1.processSample (y);
+    const float s = hpAir2.processSample (std::abs (band));
     if (sparkle > 1.0e-6f)
-    {
-        const float band = hpAir1.processSample (y);
-        const float s = hpAir2.processSample (std::abs (band));
         y += sparkle * airGain * s;
-    }
 
     return y;
 }
